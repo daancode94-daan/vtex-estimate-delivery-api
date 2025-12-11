@@ -2,55 +2,80 @@ export default async function handler(req, res) {
   const { orderId } = req.query;
 
   if (!orderId) {
-    return res.status(400).json({
-      error: "Falta el parámetro orderId"
-    });
+    return res.status(400).json({ error: "Missing orderId" });
   }
 
   try {
-    // 🔐 Tus credenciales de QA (cámbialas por variables de entorno luego)
-    const APP_KEY = process.env.VTEX_APP_KEY;
-    const APP_TOKEN = process.env.VTEX_APP_TOKEN;
+    // --- 1. Obtener datos de VTEX OMS ---
+    const vtexUrl = `https://tommymxqa.vtexcommercestable.com.br/api/oms/pvt/orders/${orderId}`;
 
-    // URL del OMS QA
-    const url = `https://tommymxqa.vtexcommercestable.com.br/api/oms/pvt/orders/${orderId}`;
-
-    const response = await fetch(url, {
+    const vtexResponse = await fetch(vtexUrl, {
       method: "GET",
       headers: {
-        "X-VTEX-API-AppKey": APP_KEY,
-        "X-VTEX-API-AppToken": APP_TOKEN,
+        "X-VTEX-API-AppKey": process.env.VTEX_APP_KEY,
+        "X-VTEX-API-AppToken": process.env.VTEX_APP_TOKEN,
         "Content-Type": "application/json"
       }
     });
 
-    if (!response.ok) {
-      return res.status(response.status).json({
-        error: `VTEX respondió con ${response.status}`
+    if (!vtexResponse.ok) {
+      return res.status(500).json({
+        error: "VTEX request failed",
+        status: vtexResponse.status
       });
     }
 
-    const data = await response.json();
+    const data = await vtexResponse.json();
 
-    // 📦 Extraemos la fecha estimada si existe
-    let estimate = null;
+    // --- 2. Intento 1: buscar shippingEstimateDate ---
+    let estimateDate =
+      data.shippingData?.logisticsInfo?.[0]?.shippingEstimateDate || null;
 
-    const logisticsInfo = data?.shippingData?.logisticsInfo?.[0];
-    if (logisticsInfo?.shippingEstimateDate) {
-      estimate = logisticsInfo.shippingEstimateDate;
+    // --- 3. Intento 2: interpretar shippingEstimate (ej: 5bd, 3d) ---
+    if (!estimateDate) {
+      const estimateRaw =
+        data.shippingData?.logisticsInfo?.[0]?.shippingEstimate || null;
+
+      if (estimateRaw) {
+        const days = parseInt(estimateRaw.replace(/\D/g, ""), 10);
+        const isBusiness = estimateRaw.includes("bd");
+
+        estimateDate = calculateDate(days, isBusiness);
+      }
     }
 
     return res.status(200).json({
       orderId,
-      status: data.status,
-      estimateDeliveryDate: estimate,
+      estimateDeliveryDate: estimateDate,
+      method: estimateDate ? "calculated" : "none",
       raw: data
     });
-
-  } catch (err) {
+  } catch (error) {
     return res.status(500).json({
-      error: "Error interno",
-      detail: err.message
+      error: "Internal error",
+      message: error.message
     });
   }
+}
+
+// --- Suma días hábiles o naturales ---
+function calculateDate(days, isBusiness) {
+  let date = new Date();
+
+  if (!isBusiness) {
+    date.setDate(date.getDate() + days);
+    return date.toISOString().split("T")[0];
+  }
+
+  // business days
+  let addedDays = 0;
+  while (addedDays < days) {
+    date.setDate(date.getDate() + 1);
+    const day = date.getDay(); // 0=Domingo, 6=Sábado
+    if (day !== 0 && day !== 6) {
+      addedDays++;
+    }
+  }
+
+  return date.toISOString().split("T")[0];
 }
